@@ -1,5 +1,7 @@
 // Copyright © 2023-2024 Apple Inc.
 #include <iostream>
+#include <functional>
+#include <numeric>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
@@ -17,6 +19,30 @@
 namespace mx = mlx::core;
 namespace nb = nanobind;
 using namespace nb::literals;
+
+namespace {
+
+size_t array_nbytes(const mx::Shape& shape, mx::Dtype dtype) {
+  auto elems = std::accumulate(shape.begin(), shape.end(), size_t{1}, std::multiplies<size_t>());
+  return elems * mx::size_of(dtype);
+}
+
+PyObject* retain_owner(nb::handle owner) {
+  auto* owner_ptr = owner.ptr();
+  Py_XINCREF(owner_ptr);
+  return owner_ptr;
+}
+
+auto make_owner_deleter(PyObject* owner_ptr) {
+  return [owner_ptr](void*) {
+    if (owner_ptr != nullptr) {
+      nb::gil_scoped_acquire gil;
+      Py_DECREF(owner_ptr);
+    }
+  };
+}
+
+}  // namespace
 
 bool DEPRECATE(const char* old_fn, const char* new_fn) {
   std::cerr << old_fn << " is deprecated and will be removed in a future "
@@ -127,6 +153,8 @@ void init_metal(nb::module_& m) {
         out["shape"] = nb::cast(a.shape());
         out["strides"] = nb::cast(a.strides());
         out["dtype"] = nb::cast(a.dtype());
+        out["logical_nbytes"] = nb::cast(a.nbytes());
+        out["buffer_nbytes"] = nb::cast(a.buffer_size());
         out["nbytes"] = nb::cast(a.nbytes());
         out["row_contiguous"] = nb::cast(a.flags().row_contiguous);
         out["contiguous"] = nb::cast(a.flags().contiguous);
@@ -166,6 +194,45 @@ void init_metal(nb::module_& m) {
       "owner"_a = nb::none(),
       R"pbdoc(
       Build an MLX array from an external raw pointer.
+
+      This helper may still copy if MLX cannot alias the pointer directly.
+
+      This is intentionally unsafe and only meant for private interop /
+      benchmarking code.
+      )pbdoc");
+  metal.def(
+      "_unsafe_array_from_ptr_alias_only",
+      [](std::uintptr_t raw_ptr,
+         mx::Shape shape,
+         mx::Dtype dtype,
+         nb::handle owner) {
+        if (!mx::metal::is_available()) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_array_from_ptr_alias_only] Metal back-end unavailable.");
+        }
+        auto* owner_ptr = retain_owner(owner);
+        auto owner_deleter = make_owner_deleter(owner_ptr);
+        auto buffer =
+            mx::allocator::make_buffer(reinterpret_cast<void*>(raw_ptr), array_nbytes(shape, dtype));
+        if (buffer.ptr() == nullptr) {
+          owner_deleter(reinterpret_cast<void*>(raw_ptr));
+          throw std::runtime_error(
+              "[mx.metal._unsafe_array_from_ptr_alias_only] MLX could not alias the pointer without a copy.");
+        }
+        auto wrapped_deleter = [owner_deleter](mx::allocator::Buffer buffer) {
+          auto ptr = buffer.raw_ptr();
+          mx::allocator::release(buffer);
+          owner_deleter(ptr);
+        };
+        return mx::array(buffer, std::move(shape), dtype, wrapped_deleter);
+      },
+      "raw_ptr"_a,
+      "shape"_a,
+      "dtype"_a,
+      "owner"_a = nb::none(),
+      R"pbdoc(
+      Build an MLX array from an external raw pointer, but fail unless MLX can
+      alias the pointer without copying.
 
       This is intentionally unsafe and only meant for private interop /
       benchmarking code.
