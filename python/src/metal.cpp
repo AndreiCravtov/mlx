@@ -8,6 +8,7 @@
 #include <nanobind/stl/variant.h>
 #include <nanobind/stl/vector.h>
 
+#include "mlx/array.h"
 #include "mlx/backend/metal/metal.h"
 #include "mlx/device.h"
 #include "mlx/memory.h"
@@ -95,4 +96,78 @@ void init_metal(nb::module_& m) {
     DEPRECATE("mx.metal.device_info", "mx.device_info");
     return mx::device_info(mx::Device(mx::Device::gpu, 0));
   });
+  metal.def(
+      "_unsafe_export_storage",
+      [](mx::array& a) {
+        if (!mx::metal::is_available()) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_export_storage] Metal back-end unavailable.");
+        }
+        if (!a.is_available()) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_export_storage] Array must already be "
+              "evaluated / synchronized.");
+        }
+        if (!a.flags().row_contiguous) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_export_storage] Only row-contiguous arrays "
+              "are supported.");
+        }
+        if (a.nbytes() != 0 && a.buffer().ptr() == nullptr) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_export_storage] Array has no backing buffer.");
+        }
+        auto raw_ptr = const_cast<mx::allocator::Buffer&>(a.buffer()).raw_ptr();
+        nb::dict out;
+        out["mtl_buffer_ptr"] =
+            nb::cast(reinterpret_cast<std::uintptr_t>(
+                const_cast<void*>(a.buffer().ptr())));
+        out["raw_ptr"] = nb::cast(reinterpret_cast<std::uintptr_t>(raw_ptr));
+        out["offset_bytes"] = nb::cast(static_cast<size_t>(a.offset()));
+        out["shape"] = nb::cast(a.shape());
+        out["strides"] = nb::cast(a.strides());
+        out["dtype"] = nb::cast(a.dtype());
+        out["nbytes"] = nb::cast(a.nbytes());
+        out["row_contiguous"] = nb::cast(a.flags().row_contiguous);
+        out["contiguous"] = nb::cast(a.flags().contiguous);
+        return out;
+      },
+      "array"_a,
+      R"pbdoc(
+      Export low-level Metal storage metadata for a realized MLX array.
+
+      This is intentionally unsafe and only meant for private interop /
+      benchmarking code.
+      )pbdoc");
+  metal.def(
+      "_unsafe_array_from_ptr",
+      [](std::uintptr_t raw_ptr,
+         mx::Shape shape,
+         mx::Dtype dtype,
+         nb::handle owner) {
+        if (!mx::metal::is_available()) {
+          throw std::runtime_error(
+              "[mx.metal._unsafe_array_from_ptr] Metal back-end unavailable.");
+        }
+        auto* owner_ptr = owner.ptr();
+        Py_XINCREF(owner_ptr);
+        auto deleter = [owner_ptr](void*) {
+          if (owner_ptr != nullptr) {
+            nb::gil_scoped_acquire gil;
+            Py_DECREF(owner_ptr);
+          }
+        };
+        return mx::array(
+            reinterpret_cast<void*>(raw_ptr), std::move(shape), dtype, deleter);
+      },
+      "raw_ptr"_a,
+      "shape"_a,
+      "dtype"_a,
+      "owner"_a = nb::none(),
+      R"pbdoc(
+      Build an MLX array from an external raw pointer.
+
+      This is intentionally unsafe and only meant for private interop /
+      benchmarking code.
+      )pbdoc");
 }
