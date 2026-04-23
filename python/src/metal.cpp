@@ -12,6 +12,7 @@
 
 #include "mlx/array.h"
 #include "mlx/backend/metal/metal.h"
+#include "mlx/backend/metal/utils.h"
 #include "mlx/device.h"
 #include "mlx/memory.h"
 #include "python/src/small_vector.h"
@@ -231,6 +232,8 @@ void init_metal(nb::module_& m) {
         return nb::borrow<nb::object>(borrower).attr("rebind")(
             nb::cast(storage.mtl_buffer_ptr),
             "owner"_a = owner_obj,
+            "shape"_a = nb::cast(storage.shape),
+            "dtype_name"_a = nb::cast(mx::type_to_name(storage.dtype)),
             "byte_offset"_a = nb::cast(storage.offset_bytes),
             "buffer_nbytes"_a = nb::cast(storage.buffer_nbytes));
       },
